@@ -94,8 +94,26 @@
 9. Try ReluSquared activation (matches leaderboard #1's LeakyReLU²)
 10. Add sliding window attention pattern SSSL
 
-### Round 3: Paper-based innovations (from research agent)
-11. Sqrt warmdown shape
-12. Tail weight averaging (EMA of final 1%)
-13. Batch size warmup (small→large)
-14. Smear module (from modded-nanogpt)
+### Round 3: Quantization (the pgolf meta-game)
+The 16MB artifact limit means quantization IS the meta-game. Lower bits = more params = better model.
+
+| Quant level | Bits/weight | Params in 16MB | Used by |
+|---|---|---|---|
+| int8 + zlib | ~6.5 effective | ~20M | Baseline |
+| int6 + zstd-22 | ~5.0 effective | ~26M | Most top entries |
+| int5 (MLP) + int6 (attn) | ~4.5 effective | ~28M | #6 entry |
+| Ternary (1-bit) | ~1.0 effective | ~100M+ | #10 entry |
+
+Experiments to run:
+11. Replace zlib with zstd-22 (free compression improvement)
+12. int6 quantization (per-row, [-32, 31] range)
+13. QAT (quantization-aware training) — train with simulated quantization noise
+14. Mixed quant: int5 for MLP, int6 for attention, fp16 for embeddings
+15. int6 + larger model (use saved bytes for more layers/width)
+16. SWA (Stochastic Weight Averaging) — smoother weights quantize better
+
+### Round 4: Paper-based innovations (from research agent)
+17. Sqrt warmdown shape
+18. Tail weight averaging (EMA of final 1%)
+19. Batch size warmup (small→large)
+20. Smear module (from modded-nanogpt)
