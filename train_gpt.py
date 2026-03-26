@@ -96,8 +96,13 @@ class Hyperparameters:
     mor_capacity = float(os.environ.get("MOR_CAPACITY", 0.5))  # fraction of tokens routed per step
     mor_aux_weight = float(os.environ.get("MOR_AUX_WEIGHT", 0.01))
 
+    # Stochastic Weight Averaging (SWA)
+    swa_enabled = bool(int(os.environ.get("SWA_ENABLED", 0)))
+    swa_start_frac = float(os.environ.get("SWA_START_FRAC", 0.5))  # start averaging at 50% of training
+    swa_every = int(os.environ.get("SWA_EVERY", 50))  # average every N steps
+
 # -----------------------------
-# MUON OPTIMIZER 
+# MUON OPTIMIZER
 # -----------------------------
 # 
 # As borrowed from modded-nanogpt
@@ -1128,6 +1133,13 @@ def main() -> None:
 
     training_time_ms = 0.0
     stop_after_step: int | None = None
+
+    # SWA: maintain running average of model weights
+    swa_state: dict[str, Tensor] | None = None
+    swa_count = 0
+    if args.swa_enabled:
+        swa_state = {name: p.detach().clone() for name, p in base_model.named_parameters()}
+
     torch.cuda.synchronize()
     t0 = time.perf_counter()
 
@@ -1197,6 +1209,14 @@ def main() -> None:
             opt.step()
         zero_grad_all()
 
+        # SWA: accumulate weight average after swa_start_frac of training
+        if swa_state is not None and args.swa_every > 0:
+            progress = approx_training_time_ms / max_wallclock_ms if max_wallclock_ms else step / args.iterations
+            if progress >= args.swa_start_frac and step % args.swa_every == 0:
+                swa_count += 1
+                for name, p in base_model.named_parameters():
+                    swa_state[name].lerp_(p.detach(), 1.0 / swa_count)
+
         step += 1
         approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         should_log_train = (
@@ -1222,6 +1242,13 @@ def main() -> None:
         f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
     )
+
+    # Load SWA averaged weights if available
+    if swa_state is not None and swa_count > 0:
+        log0(f"SWA: loading averaged weights ({swa_count} checkpoints)")
+        with torch.no_grad():
+            for name, p in base_model.named_parameters():
+                p.copy_(swa_state[name])
 
     # -----------------------------
     # SERIALIZATION + ROUNDTRIP VALIDATION
