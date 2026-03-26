@@ -711,22 +711,12 @@ class Block(nn.Module):
         return x
 
 
-class MoRRouter(nn.Module):
-    """Linear router that scores tokens for recursion selection."""
-    def __init__(self, dim: int):
-        super().__init__()
-        self.linear = nn.Linear(dim, 1, bias=False)
-        nn.init.zeros_(self.linear.weight)
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.linear(x).squeeze(-1)  # (B, T)
-
-
 class MoRBlock(nn.Module):
-    """Wraps a shared Block with expert-choice routing across recursion steps.
+    """Shared block with N recursion steps. No routing — all tokens go through
+    every recursion. This is the simplest form: pure parameter sharing with
+    per-recursion norms to differentiate iterations.
 
-    Middle-Cycle: unique first/last blocks, shared middle block repeated N times.
-    At each recursion, router selects top-k% of tokens; rest skip via residual.
+    Equivalent to N layers but with shared weights = massive param savings.
     """
     def __init__(
         self,
@@ -739,48 +729,24 @@ class MoRBlock(nn.Module):
         super().__init__()
         self.shared_block = shared_block
         self.num_recursions = num_recursions
-        self.capacity = capacity
-        self.aux_loss_weight = aux_loss_weight
-        # Per-recursion router + layer norm to differentiate iterations
-        self.routers = nn.ModuleList([MoRRouter(dim) for _ in range(num_recursions)])
+        # Per-recursion layer norms to differentiate iterations
         self.rec_norms = nn.ModuleList([RMSNorm() for _ in range(num_recursions)])
-        # Per-recursion learnable scale (starts small so shared block eases in)
+        # Per-recursion learnable scale
         self.rec_scales = nn.ParameterList([
             nn.Parameter(torch.tensor(1.0 / num_recursions, dtype=torch.float32))
             for _ in range(num_recursions)
         ])
 
     def forward(self, x: Tensor, x0: Tensor) -> tuple[Tensor, Tensor]:
-        B, T, D = x.shape
-        k = max(1, int(T * self.capacity))
         aux_loss = torch.tensor(0.0, device=x.device, dtype=torch.float32)
-
         for r in range(self.num_recursions):
-            scores = self.routers[r](x)  # (B, T)
-
-            # Expert-choice: select top-k tokens per batch element
-            _, topk_idx = scores.topk(k, dim=-1)  # (B, k)
-
-            # Gather selected tokens
-            idx_expanded = topk_idx.unsqueeze(-1).expand(-1, -1, D)
-            x_selected = torch.gather(x, 1, idx_expanded)  # (B, k, D)
-            x0_selected = torch.gather(x0, 1, idx_expanded)  # (B, k, D)
-
-            # Run shared block on selected tokens with per-recursion norm
-            x_normed = self.rec_norms[r](x_selected)
-            x_processed = self.shared_block(x_normed, x0_selected)
+            # Per-recursion norm differentiates each pass through the shared block
+            x_in = self.rec_norms[r](x)
+            x_out = self.shared_block(x_in, x0)
             scale = self.rec_scales[r].to(dtype=x.dtype)
-
-            # Scatter back: selected tokens get updated, rest keep residual
-            x = x.scatter(1, idx_expanded, x_selected + scale * (x_processed - x_normed))
-
-            # Aux loss: BCE to train router to predict its own top-k causally
-            if self.training:
-                target = torch.zeros(B, T, device=x.device)
-                target.scatter_(1, topk_idx, 1.0)
-                aux_loss = aux_loss + F.binary_cross_entropy_with_logits(scores, target)
-
-        aux_loss = aux_loss * self.aux_loss_weight / max(self.num_recursions, 1)
+            # Delta update: x_out already has internal residual (x_in + attn + mlp)
+            # so delta = x_out - x_in = attn + mlp
+            x = x + scale * (x_out - x_in)
         return x, aux_loss
 
 
