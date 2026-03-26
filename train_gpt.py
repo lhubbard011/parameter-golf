@@ -1026,7 +1026,15 @@ def main() -> None:
     # - untied lm_head (Adam) uses HEAD_LR
     # - matrix params in transformer blocks use MATRIX_LR via Muon
     # - vectors/scalars use SCALAR_LR via Adam
-    block_named_params = list(base_model.blocks.named_parameters())
+    # Collect block params from either standard blocks or MoR components
+    if args.mor_enabled:
+        block_named_params = (
+            list(base_model.first_block.named_parameters()) +
+            list(base_model.mor_block.named_parameters()) +
+            list(base_model.last_block.named_parameters())
+        )
+    else:
+        block_named_params = list(base_model.blocks.named_parameters())
     matrix_params = [
         p
         for name, p in block_named_params
