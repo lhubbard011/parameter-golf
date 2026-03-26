@@ -90,6 +90,12 @@ class Hyperparameters:
     bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 0))
     bigram_dim = int(os.environ.get("BIGRAM_DIM", 128))
 
+    # Mixture-of-Recursions (MoR)
+    mor_enabled = bool(int(os.environ.get("MOR_ENABLED", 0)))
+    mor_num_recursions = int(os.environ.get("MOR_NUM_RECURSIONS", 4))
+    mor_capacity = float(os.environ.get("MOR_CAPACITY", 0.5))  # fraction of tokens routed per step
+    mor_aux_weight = float(os.environ.get("MOR_AUX_WEIGHT", 0.01))
+
 # -----------------------------
 # MUON OPTIMIZER 
 # -----------------------------
@@ -705,6 +711,79 @@ class Block(nn.Module):
         return x
 
 
+class MoRRouter(nn.Module):
+    """Linear router that scores tokens for recursion selection."""
+    def __init__(self, dim: int):
+        super().__init__()
+        self.linear = nn.Linear(dim, 1, bias=False)
+        nn.init.zeros_(self.linear.weight)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.linear(x).squeeze(-1)  # (B, T)
+
+
+class MoRBlock(nn.Module):
+    """Wraps a shared Block with expert-choice routing across recursion steps.
+
+    Middle-Cycle: unique first/last blocks, shared middle block repeated N times.
+    At each recursion, router selects top-k% of tokens; rest skip via residual.
+    """
+    def __init__(
+        self,
+        shared_block: Block,
+        dim: int,
+        num_recursions: int,
+        capacity: float = 0.5,
+        aux_loss_weight: float = 0.01,
+    ):
+        super().__init__()
+        self.shared_block = shared_block
+        self.num_recursions = num_recursions
+        self.capacity = capacity
+        self.aux_loss_weight = aux_loss_weight
+        # Per-recursion router + layer norm to differentiate iterations
+        self.routers = nn.ModuleList([MoRRouter(dim) for _ in range(num_recursions)])
+        self.rec_norms = nn.ModuleList([RMSNorm() for _ in range(num_recursions)])
+        # Per-recursion learnable scale (starts small so shared block eases in)
+        self.rec_scales = nn.ParameterList([
+            nn.Parameter(torch.tensor(1.0 / num_recursions, dtype=torch.float32))
+            for _ in range(num_recursions)
+        ])
+
+    def forward(self, x: Tensor, x0: Tensor) -> tuple[Tensor, Tensor]:
+        B, T, D = x.shape
+        k = max(1, int(T * self.capacity))
+        aux_loss = torch.tensor(0.0, device=x.device, dtype=torch.float32)
+
+        for r in range(self.num_recursions):
+            scores = self.routers[r](x)  # (B, T)
+
+            # Expert-choice: select top-k tokens per batch element
+            _, topk_idx = scores.topk(k, dim=-1)  # (B, k)
+
+            # Gather selected tokens
+            idx_expanded = topk_idx.unsqueeze(-1).expand(-1, -1, D)
+            x_selected = torch.gather(x, 1, idx_expanded)  # (B, k, D)
+            x0_selected = torch.gather(x0, 1, idx_expanded)  # (B, k, D)
+
+            # Run shared block on selected tokens with per-recursion norm
+            x_normed = self.rec_norms[r](x_selected)
+            x_processed = self.shared_block(x_normed, x0_selected)
+            scale = self.rec_scales[r].to(dtype=x.dtype)
+
+            # Scatter back: selected tokens get updated, rest keep residual
+            x = x.scatter(1, idx_expanded, x_selected + scale * (x_processed - x_normed))
+
+            # Aux loss: BCE to train router to predict its own top-k causally
+            if self.training:
+                target = torch.zeros(B, T, device=x.device)
+                target.scatter_(1, topk_idx, 1.0)
+                aux_loss = aux_loss + F.binary_cross_entropy_with_logits(scores, target)
+
+        aux_loss = aux_loss * self.aux_loss_weight / max(self.num_recursions, 1)
+        return x, aux_loss
+
+
 class GPT(nn.Module):
     def __init__(
         self,
@@ -721,6 +800,10 @@ class GPT(nn.Module):
         qk_gain_init: float,
         bigram_vocab_size: int = 0,
         bigram_dim: int = 128,
+        mor_enabled: bool = False,
+        mor_num_recursions: int = 4,
+        mor_capacity: float = 0.5,
+        mor_aux_weight: float = 0.01,
     ):
         super().__init__()
         if logit_softcap <= 0.0:
@@ -728,26 +811,40 @@ class GPT(nn.Module):
         self.tie_embeddings = tie_embeddings
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
+        self.mor_enabled = mor_enabled
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim) if bigram_vocab_size > 0 else None
         self.smear = SmearGate(model_dim)
-        self.num_encoder_layers = num_layers // 2
-        self.num_decoder_layers = num_layers - self.num_encoder_layers
-        self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
-        self.skip_weights = nn.Parameter(torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32))
-        self.blocks = nn.ModuleList(
-            [
-                Block(
-                    model_dim,
-                    num_heads,
-                    num_kv_heads,
-                    mlp_mult,
-                    rope_base,
-                    qk_gain_init,
-                )
-                for i in range(num_layers)
-            ]
-        )
+
+        block_args = (model_dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
+
+        if mor_enabled:
+            # Middle-Cycle: unique first + last, shared middle with MoR routing
+            self.first_block = Block(*block_args)
+            self.last_block = Block(*block_args)
+            shared_middle = Block(*block_args)
+            self.mor_block = MoRBlock(
+                shared_block=shared_middle,
+                dim=model_dim,
+                num_recursions=mor_num_recursions,
+                capacity=mor_capacity,
+                aux_loss_weight=mor_aux_weight,
+            )
+            # No encoder/decoder split or skip weights in MoR mode
+            self.num_encoder_layers = 0
+            self.num_decoder_layers = 0
+            self.skip_weights = nn.Parameter(torch.empty(0, model_dim))
+            self.blocks = nn.ModuleList()  # empty, not used
+        else:
+            self.first_block = None
+            self.last_block = None
+            self.mor_block = None
+            self.num_encoder_layers = num_layers // 2
+            self.num_decoder_layers = num_layers - self.num_encoder_layers
+            self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
+            self.skip_weights = nn.Parameter(torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32))
+            self.blocks = nn.ModuleList([Block(*block_args) for _ in range(num_layers)])
+
         self.final_norm = RMSNorm()
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         if self.lm_head is not None:
@@ -768,16 +865,23 @@ class GPT(nn.Module):
         x = F.rms_norm(x, (x.size(-1),))
         x = self.smear(x)
         x0 = x
-        skips: list[Tensor] = []
+        aux_loss = torch.tensor(0.0, device=x.device, dtype=torch.float32)
 
-        # First half stores skips; second half reuses them in reverse order.
-        for i in range(self.num_encoder_layers):
-            x = self.blocks[i](x, x0)
-            skips.append(x)
-        for i in range(self.num_decoder_layers):
-            if skips:
-                x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
-            x = self.blocks[self.num_encoder_layers + i](x, x0)
+        if self.mor_enabled:
+            # MoR path: unique first -> shared middle with routing -> unique last
+            x = self.first_block(x, x0)
+            x, aux_loss = self.mor_block(x, x0)
+            x = self.last_block(x, x0)
+        else:
+            # Standard path with encoder/decoder skip connections
+            skips: list[Tensor] = []
+            for i in range(self.num_encoder_layers):
+                x = self.blocks[i](x, x0)
+                skips.append(x)
+            for i in range(self.num_decoder_layers):
+                if skips:
+                    x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
+                x = self.blocks[self.num_encoder_layers + i](x, x0)
 
         x = self.final_norm(x).reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
@@ -788,7 +892,8 @@ class GPT(nn.Module):
                 raise RuntimeError("lm_head is required when tie_embeddings=False")
             logits_proj = self.lm_head(x)
         logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-        return F.cross_entropy(logits.float(), targets, reduction="mean")
+        ce_loss = F.cross_entropy(logits.float(), targets, reduction="mean")
+        return ce_loss + aux_loss
 
 
 # -----------------------------
@@ -904,6 +1009,10 @@ def main() -> None:
         qk_gain_init=args.qk_gain_init,
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
+        mor_enabled=args.mor_enabled,
+        mor_num_recursions=args.mor_num_recursions,
+        mor_capacity=args.mor_capacity,
+        mor_aux_weight=args.mor_aux_weight,
     ).to(device).bfloat16()
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
