@@ -1211,7 +1211,7 @@ def main() -> None:
 
         # SWA: accumulate weight average after swa_start_frac of training
         if swa_state is not None and args.swa_every > 0:
-            progress = approx_training_time_ms / max_wallclock_ms if max_wallclock_ms else step / args.iterations
+            progress = elapsed_ms / max_wallclock_ms if max_wallclock_ms else step / args.iterations
             if progress >= args.swa_start_frac and step % args.swa_every == 0:
                 swa_count += 1
                 for name, p in base_model.named_parameters():
