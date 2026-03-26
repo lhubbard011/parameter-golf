@@ -61,7 +61,8 @@ ssh $SOPTS ubuntu@$IP "cd ~/parameter-golf && git fetch origin && git reset --ha
 # python3 -u = unbuffered, stdbuf -oL = line-buffered — so we can peek mid-run.
 ssh $SOPTS ubuntu@$IP "
 cd ~/parameter-golf &&
-stdbuf -oL $ENV_VARS RUN_ID=$RUN_ID python3 -u train_gpt.py > run_${RUN_ID}.log 2>&1
+export $ENV_VARS RUN_ID=$RUN_ID &&
+python3 -u train_gpt.py > run_${RUN_ID}.log 2>&1
 echo \$? > run_${RUN_ID}.exitcode
 "
 
