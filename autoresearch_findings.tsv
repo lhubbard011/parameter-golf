@@ -1,0 +1,127 @@
+commit	val_bpb	memory_gb	status	description
+32a1460	0.996295	44.0	keep	baseline
+a7a8760	1.096461	83.9	discard	depth 8->16 batch 64 (too big - only 192 steps - undertrained)
+2a2a298	1.001189	47.0	discard	relay heads auxiliary gradient signal (overhead hurt more than it helped)
+6bb13be	1.019009	66.5	discard	depth 8->10 (too few steps 565 vs 935 - undertrained)
+66c4b26	0.995834	44.0	keep	Muon matrix LR 0.04->0.06
+53791ef	0.998419	44.0	discard	Muon matrix LR 0.06->0.08 (overshot)
+ea4ced2	0.991414	44.0	keep	warmdown 0.5->0.67
+2dfd874	0.992322	44.0	discard	x0_lambdas init 0.1->0.05
+fd0f424	0.995756	44.0	discard	softcap 15->30
+8651adf	0.996510	44.5	discard	SwiGLU MLP
+07d17bd	0.991600	44.0	discard	lm_head init 0.001->0.01
+fb5e81f	0.992265	44.0	discard	weight decay 0.2->0.1
+c4fc514	0.993169	44.0	discard	lm_head init 0.001->0.01 (stacked on warmdown)
+2b7be9f	0.994412	44.0	discard	stack lm_head 0.01 + x0_lambdas 0.05 + weight decay 0.1
+c312a48	0.992579	44.0	discard	warmdown 0.67->0.75 (overshot)
+005dc38	1.163821	71.5	discard	bottleneck-aware factorized loss (too slow - 337 steps - massive overhead)
+fd5f563	1.053406	71.5	discard	bottleneck-aware 900s budget (989 steps - arch itself hurts even with equal steps)
+6b79d8e	0.992832	44.0	discard	matrix LR 0.05
+f65346a	0.992768	44.0	discard	matrix LR 0.055
+31248e5	0.000000	0.0	crash	remove all value embeddings (save 16.8M params)
+e789d03	3.215849	44.0	discard	weight tying wte=lm_head (save 4.2M params)
+12e82f8	0.998181	43.4	discard	VE every 4th layer (save ~8.4M params)
+9bb3528	1.003022	43.2	discard	VE only last layer (save ~12.6M params)
+f9bee46	0.000000	0.0	crash	half-dim value embeddings (save ~8.4M)
+cb282c7	0.997647	43.2	discard	shared single VE across all layers
+8687a25	0.997111	40.4	discard	GQA n_kv_head=n_head//2
+e6668c6	1.004359	38.6	discard	MQA n_kv_head=1
+7d477b5	0.991192	41.7	keep	depth 6 AR 88 (fewer VE layers + more steps)
+7d477b5	0.991035	41.7	keep	depth 6 same width (fast small)
+7d477b5	0.991602	41.7	discard	depth 4 AR 128 (tiny fast model)
+ee687f8	0.000000	0.0	crash	weight tying + no VE (max param savings ~21M)
+cccfbea	0.000000	0.0	crash	stochastic depth (10% drop, linear)
+c0fc0a7	0.000000	0.0	crash	layer sharing (4 unique blocks repeated 2x)
+05d7dbf	0.995544	41.7	discard	remove softcap entirely
+4aa2c0d	1.333107	49.7	discard	label smoothing 0.1
+7b62e7b	0.998525	41.9	discard	embedding dropout 0.1
+e7726e5	0.992504	41.7	discard	RoPE base 50000
+5e0dda9	0.996264	41.7	discard	RoPE base 1000
+0f30068	0.990010	45.5	keep	MLP 5x expansion
+0f30068	0.990589	45.5	discard	MLP 2x expansion (smaller FFN more steps)
+d13d616	0.995071	44.0	discard	remove x0 skip + resid_lambdas (plain residual)
+f1ddb6e	0.990174	45.5	discard	gradient clipping max_norm=1.0
+40895f1	0.990530	45.5	discard	all-short windows (S only, last=L forced)
+a280326	0.993721	45.5	discard	cosine warmdown schedule
+a04699d	1.004392	41.7	discard	disable QK norm
+d7b23b9	0.990746	45.5	discard	muon beta2=0.99
+f7d7ec8	0.992863	49.3	discard	sandwich norm (pre+post)
+315aae4	0.990981	45.8	discard	causal token shift mixing (0.1 blend)
+4b9c0e1	1.012101	41.8	discard	parallel attn+MLP (PaLM style)
+953cf07	0.990692	45.5	discard	matrix LR 0.05
+0733f81	0.990117	45.5	discard	matrix LR 0.055
+62b8230	0.990677	45.5	discard	matrix LR 0.065
+8b61689	0.991011	45.5	discard	matrix LR 0.07
+fc64955	0.990805	45.5	discard	matrix LR 0.045
+2d3505a	0.992053	45.5	discard	matrix LR 0.075
+39ff0fe	0.990366	45.5	discard	warmdown 0.60
+7169e0f	0.990783	45.5	discard	warmdown 0.63
+5388522	0.990020	45.5	discard	warmdown 0.65
+692cdd9	0.990296	45.5	discard	warmdown 0.70
+c22f758	0.990967	45.5	discard	warmdown 0.72
+bd52bda	0.992326	45.5	discard	embedding LR 0.4
+7a7e065	0.990837	45.5	discard	embedding LR 0.5
+cd86f29	0.990924	45.5	discard	embedding LR 0.7
+825ba47	0.991846	45.5	discard	embedding LR 0.8
+69a6239	0.991095	45.5	discard	embedding LR 1.0
+726acd9	0.995296	45.5	discard	unembedding LR 0.002
+0515b4e	0.993055	45.5	discard	unembedding LR 0.003
+3cccdc1	0.990551	45.5	discard	unembedding LR 0.006
+9f199dd	0.990224	45.5	discard	unembedding LR 0.008
+ac0c846	0.991785	45.5	discard	scalar LR 0.3
+70ce5eb	0.990683	45.5	discard	scalar LR 0.7
+0b7e86d	0.991252	45.5	discard	scalar LR 1.0
+031c5d7	0.000000	0.0	crash	batch size 2**17
+8467fe3	0.981510	45.3	keep	batch size 2**18
+8467fe3	0.982268	45.3	discard	batch size 2**20
+4f6f493	0.978542	45.3	keep	weight decay 0.05
+4f6f493	0.978018	45.3	keep	weight decay 0.1
+4f6f493	0.978350	45.3	discard	weight decay 0.15
+bbe8850	0.978433	45.3	discard	weight decay 0.3
+d2e0222	0.978344	45.3	discard	adam betas (0.85, 0.95)
+ca7f7f3	0.978325	45.3	discard	adam betas (0.9, 0.95)
+f384d65	0.979581	45.3	discard	adam betas (0.8, 0.99)
+ccb4aa7	0.979452	45.3	discard	adam betas (0.9, 0.99)
+4b2e8bb	0.979705	45.3	discard	warmup 0.02
+f7a7e28	0.981018	45.3	discard	warmup 0.05
+c39fd85	0.982894	45.3	discard	warmup 0.1
+eb7cd41	0.977828	45.3	keep	final LR frac 0.01
+51578dc	0.978170	45.3	discard	final LR frac 0.05
+4c1eec6	0.978537	45.3	discard	final LR frac 0.1
+30f054b	0.978007	45.3	discard	window SL
+cf79ce9	0.978636	45.3	discard	window SSL
+5c62a9a	0.979862	45.3	discard	window L
+3ab630e	0.978555	45.3	discard	window SSSSL
+34a85c4	0.995636	41.3	discard	head dim 64
+eead3ca	0.985750	41.2	discard	head dim 96
+772b20c	0.000000	0.0	crash	head dim 256
+f266295	0.978868	45.3	discard	softcap 10
+28d0fb2	0.978578	45.3	discard	softcap 12
+8eb50ae	0.978860	45.3	discard	softcap 20
+f815fe9	0.978272	45.3	discard	depth 6
+084567e	0.977967	45.3	discard	depth 7
+2ff17df	0.977847	45.3	discard	depth 9
+d8b5d72	0.978079	45.3	discard	ve gate channels 16
+8d56634	0.977415	45.3	keep	ve gate channels 64
+ec5230c	0.987312	45.3	discard	muon ns_steps 3
+1d9a3ce	0.979057	45.3	discard	muon ns_steps 4
+ce13d09	0.980855	45.3	discard	combo: batch 2^18 + warmup 0.05
+f9a099f	3.215849	41.5	discard	combo: parallel attn+MLP + weight tying
+8d56634	0.977424	45.3	discard	combo: d6_wide
+5aefa4f	0.977634	45.3	discard	combo: d6_fast
+3bcc62b	0.000000	0.0	crash	combo: d6_gqa
+00bcb87	0.000000	0.0	crash	combo: d6_noVE
+1385909	0.978530	45.3	discard	cosine warmdown + final_lr 0.05
+a0ab85a	0.977024	45.3	keep	aspect ratio 48
+a0ab85a	0.977333	45.3	discard	aspect ratio 56
+08bed09	0.977013	45.3	keep	aspect ratio 72
+08bed09	0.977680	45.3	discard	aspect ratio 80
+1b97dc7	0.977348	45.3	discard	wte init std 0.5
+bde4696	0.981772	45.3	discard	wte init std 0.02
+e20bd4a	0.000000	0.0	crash	resid_lambdas init 0.5
+9facd2d	0.978531	45.3	discard	resid_lambdas init 1.5
+9440d8e	0.977796	45.3	discard	x0_lambdas init 0.02
+53d8f8b	0.980133	45.3	discard	x0_lambdas init 0.2
+631d31f	0.982309	45.3	discard	x0_lambdas init 0.0
+bca8830	0.979407	45.3	discard	combo: batch 2^18 + warmup 0.02 + final_lr 0.01
+e6c1687	0.976825	45.3	keep	combo: depth 7 + AR 72 (balanced)
