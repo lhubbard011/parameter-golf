@@ -512,11 +512,26 @@ class RMSNorm(nn.Module):
         return F.rms_norm(x, (x.size(-1),), eps=self.eps)
 
 
+QAT_START_FRAC = float(os.environ.get("QAT_START_FRAC", 0.0))  # 0 = disabled, e.g. 0.15 = start QAT at 15%
+_qat_progress = [0.0]  # mutable container for training progress
+
+def fake_quantize_ste(w: Tensor, qmax: int = QUANT_MAX) -> Tensor:
+    """Simulate quantization with straight-through estimator."""
+    w32 = w.float()
+    abs_max = w32.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8)
+    scale = abs_max / qmax
+    q = torch.clamp(torch.round(w32 / scale), -qmax, qmax)
+    w_deq = (q * scale).to(w.dtype)
+    return w + (w_deq - w).detach()  # STE: forward uses quantized, backward uses original
+
 class CastedLinear(nn.Linear):
     # Keep weights in fp32 for optimizer/state quality, cast at matmul time for bf16 compute.
     def forward(self, x: Tensor) -> Tensor:
+        w = self.weight.to(x.dtype)
+        if self.training and QAT_START_FRAC > 0 and _qat_progress[0] >= QAT_START_FRAC:
+            w = fake_quantize_ste(w, QUANT_MAX)
         bias = self.bias.to(x.dtype) if self.bias is not None else None
-        return F.linear(x, self.weight.to(x.dtype), bias)
+        return F.linear(x, w, bias)
 
 
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
@@ -1069,6 +1084,8 @@ def main() -> None:
             break
 
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
+        if max_wallclock_ms is not None and max_wallclock_ms > 0:
+            _qat_progress[0] = elapsed_ms / max_wallclock_ms
         scale = lr_mul(step, elapsed_ms)
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
