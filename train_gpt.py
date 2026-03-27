@@ -44,9 +44,9 @@ class Hyperparameters:
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
     # Training length.
     iterations = int(os.environ.get("ITERATIONS", 20000))
-    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 1200))
+    warmdown_iters = int(os.environ.get("WARMDOWN_ITERS", 13000))
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
-    train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
+    train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 262_144))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
     qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
@@ -65,7 +65,7 @@ class Hyperparameters:
     head_lr = float(os.environ.get("HEAD_LR", 0.008))
     tied_embed_lr = float(os.environ.get("TIED_EMBED_LR", 0.05))
     tied_embed_init_std = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
-    matrix_lr = float(os.environ.get("MATRIX_LR", 0.04))
+    matrix_lr = float(os.environ.get("MATRIX_LR", 0.06))
     scalar_lr = float(os.environ.get("SCALAR_LR", 0.04))
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.95))
     muon_backend_steps = int(os.environ.get("MUON_BACKEND_STEPS", 5))
@@ -89,9 +89,9 @@ class Hyperparameters:
     mamba_state_dim = int(os.environ.get("MAMBA_STATE_DIM", 16))
     mamba_expand = int(os.environ.get("MAMBA_EXPAND", 2))
     # Stochastic Weight Averaging (SWA)
-    swa_enabled = bool(int(os.environ.get("SWA_ENABLED", 0)))
-    swa_start_frac = float(os.environ.get("SWA_START_FRAC", 0.5))  # start averaging at 50% of training
-    swa_every = int(os.environ.get("SWA_EVERY", 50))  # average every N steps
+    swa_enabled = True
+    swa_start_frac = 0.5  # start averaging at 50% of training
+    swa_every = 50  # average every N steps
     # AdaFisher: second-order optimizer using Fisher Information (replaces Muon when enabled)
     # Requires: git clone https://github.com/AtlasAnalyticsLab/AdaFisher.git
     # Set ADAFISHER_PATH to the repo root (default: ./AdaFisher)
@@ -289,9 +289,9 @@ INT8_KEEP_FLOAT_STORE_DTYPE = torch.float16
 INT8_PER_ROW_SCALE_DTYPE = torch.float16
 INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
-QUANT_BITS = int(os.environ.get("QUANT_BITS", 8))
+QUANT_BITS = 8
 QUANT_MAX = {6: 31, 8: 127}[QUANT_BITS]
-SPIN_QUANT = bool(int(os.environ.get("SPIN_QUANT", 0)))  # Hadamard rotation before quantization
+SPIN_QUANT = True  # Hadamard rotation before quantization — fused at block boundaries
 
 def _hadamard_matrix(n: int) -> Tensor:
     """Generate a normalized Hadamard-like orthogonal matrix of size n.
