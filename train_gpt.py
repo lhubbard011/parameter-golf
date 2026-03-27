@@ -291,6 +291,41 @@ INT8_CLIP_PERCENTILE = 99.99984
 INT8_CLIP_Q = INT8_CLIP_PERCENTILE / 100.0
 QUANT_BITS = int(os.environ.get("QUANT_BITS", 8))
 QUANT_MAX = {6: 31, 8: 127}[QUANT_BITS]
+SPIN_QUANT = bool(int(os.environ.get("SPIN_QUANT", 0)))  # Hadamard rotation before quantization
+
+def _hadamard_matrix(n: int) -> Tensor:
+    """Generate a normalized Hadamard-like orthogonal matrix of size n.
+    Uses the recursive Sylvester construction for powers of 2,
+    pads with identity for non-power-of-2 sizes."""
+    # Find next power of 2
+    p = 1
+    while p < n:
+        p *= 2
+    # Build Hadamard for power of 2
+    H = torch.tensor([[1.0]])
+    while H.size(0) < p:
+        H = torch.cat([torch.cat([H, H], dim=1), torch.cat([H, -H], dim=1)], dim=0)
+    H = H[:n, :n]  # truncate to n
+    H = H / (n ** 0.5)  # normalize
+    return H
+
+def spin_rotate_state_dict(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+    """Apply Hadamard rotation to 2D weight matrices before quantization.
+    Returns (rotated_state_dict, rotation_matrices) — rotations must be
+    stored and applied at inference to undo the rotation."""
+    rotated = {}
+    rotations = {}
+    for name, t in state_dict.items():
+        if t.ndim == 2 and t.is_floating_point() and t.numel() > INT8_KEEP_FLOAT_MAX_NUMEL:
+            # Rotate columns: W' = W @ R, where R is orthogonal
+            # At inference: x' = R^T @ x, then W' @ x' = W @ R @ R^T @ x = W @ x
+            cols = t.shape[1]
+            R = _hadamard_matrix(cols).to(t.device, t.dtype)
+            rotated[name] = t @ R
+            rotations[name] = R
+        else:
+            rotated[name] = t
+    return rotated, rotations
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
 def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, str]) -> Tensor:
@@ -1026,7 +1061,14 @@ def main() -> None:
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
-    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
+    sd = base_model.state_dict()
+    spin_rotations = None
+    if SPIN_QUANT:
+        log0("SpinQuant: applying Hadamard rotation before quantization...")
+        sd, spin_rotations = spin_rotate_state_dict(sd)
+    quant_obj, quant_stats = quantize_state_dict_int8(sd)
+    if spin_rotations:
+        quant_obj["spin_rotations"] = {name: R.half() for name, R in spin_rotations.items()}
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
