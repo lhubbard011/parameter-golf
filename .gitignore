@@ -1,3 +1,5 @@
+.env
+.instance_state
 data/tokenizers
 __pycache__/
 .DS_Store
