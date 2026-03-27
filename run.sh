@@ -172,7 +172,7 @@ ensure_instance() {
         [ -d ~/parameter-golf ] || git clone https://${GHTOK}@github.com/lhubbard011/parameter-golf.git ~/parameter-golf
         cd ~/parameter-golf && git fetch origin && git checkout $BRANCH 2>/dev/null || git checkout -b $BRANCH origin/$BRANCH
         git reset --hard origin/$BRANCH
-        pip install -q sentencepiece numpy torch 2>/dev/null
+        pip install -q sentencepiece numpy torch huggingface-hub datasets tqdm 2>/dev/null
         [ -d data/datasets/fineweb10B_sp1024 ] || python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 10
     " 2>&1
     log "Ready"
