@@ -95,7 +95,7 @@ class Hyperparameters:
     # AdaFisher: second-order optimizer using Fisher Information (replaces Muon when enabled)
     # Requires: git clone https://github.com/AtlasAnalyticsLab/AdaFisher.git
     # Set ADAFISHER_PATH to the repo root (default: ./AdaFisher)
-    use_adafisher = True
+    use_adafisher = False
     adafisher_path = os.environ.get("ADAFISHER_PATH", "./AdaFisher")
     adafisher_lr = float(os.environ.get("ADAFISHER_LR", 1e-3))
     adafisher_wd = float(os.environ.get("ADAFISHER_WD", 5e-4))
