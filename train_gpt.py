@@ -96,6 +96,12 @@ class Hyperparameters:
     mor_capacity = float(os.environ.get("MOR_CAPACITY", 0.5))  # fraction of tokens routed per step
     mor_aux_weight = float(os.environ.get("MOR_AUX_WEIGHT", 0.01))
 
+    # Hybrid Mamba-Attention
+    hybrid_enabled = bool(int(os.environ.get("HYBRID_ENABLED", 0)))
+    mamba_layers = os.environ.get("MAMBA_LAYERS", "")  # comma-separated layer indices, e.g. "0,1,2,3"
+    mamba_state_dim = int(os.environ.get("MAMBA_STATE_DIM", 16))
+    mamba_expand = int(os.environ.get("MAMBA_EXPAND", 2))
+
     # Stochastic Weight Averaging (SWA)
     swa_enabled = bool(int(os.environ.get("SWA_ENABLED", 0)))
     swa_start_frac = float(os.environ.get("SWA_START_FRAC", 0.5))  # start averaging at 50% of training
@@ -649,6 +655,122 @@ class MLP(nn.Module):
         return self.proj(x.square())
 
 
+class MambaBlock(nn.Module):
+    """Simplified Mamba (S6) selective state space model in pure PyTorch.
+    No custom CUDA kernels — works with torch.compile.
+
+    Core idea: input-dependent state transitions (selective scan) give
+    Mamba the ability to focus on relevant tokens like attention, but
+    with O(N) instead of O(N^2) compute per layer.
+    """
+    def __init__(self, dim: int, state_dim: int = 16, expand: int = 2, dt_rank: int = 0):
+        super().__init__()
+        inner_dim = dim * expand
+        self.dt_rank = dt_rank if dt_rank > 0 else max(1, dim // 16)
+
+        # Input projection: x -> (z, x_proj) for gating
+        self.in_proj = CastedLinear(dim, inner_dim * 2, bias=False)
+
+        # Conv1d for local context (causal, kernel=4)
+        self.conv1d = nn.Conv1d(inner_dim, inner_dim, kernel_size=4, padding=3, groups=inner_dim, bias=True)
+
+        # SSM parameters: project x -> (dt, B, C)
+        self.x_proj = CastedLinear(inner_dim, self.dt_rank + state_dim * 2, bias=False)
+
+        # dt projection
+        self.dt_proj = CastedLinear(self.dt_rank, inner_dim, bias=True)
+
+        # Learnable SSM parameters
+        self.A_log = nn.Parameter(torch.log(torch.arange(1, state_dim + 1, dtype=torch.float32).unsqueeze(0).expand(inner_dim, -1)))
+        self.D = nn.Parameter(torch.ones(inner_dim, dtype=torch.float32))
+
+        # Output projection
+        self.out_proj = CastedLinear(inner_dim, dim, bias=False)
+        self.out_proj._zero_init = True
+
+        self.inner_dim = inner_dim
+        self.state_dim = state_dim
+
+    def forward(self, x: Tensor) -> Tensor:
+        B, L, D = x.shape
+
+        # Input projection + gate split
+        xz = self.in_proj(x)  # (B, L, 2*inner)
+        x_inner, z = xz.chunk(2, dim=-1)  # each (B, L, inner)
+
+        # Causal conv1d
+        x_conv = x_inner.transpose(1, 2)  # (B, inner, L)
+        x_conv = self.conv1d(x_conv)[:, :, :L]  # causal: trim to original length
+        x_inner = F.silu(x_conv.transpose(1, 2))  # (B, L, inner)
+
+        # SSM parameters from input
+        ssm_params = self.x_proj(x_inner)  # (B, L, dt_rank + 2*state_dim)
+        dt, B_param, C_param = torch.split(ssm_params, [self.dt_rank, self.state_dim, self.state_dim], dim=-1)
+        dt = F.softplus(self.dt_proj(dt))  # (B, L, inner)
+
+        # Discretized A
+        A = -torch.exp(self.A_log.float())  # (inner, state_dim)
+
+        # Selective scan (sequential, pure PyTorch)
+        # For torch.compile: use a simple loop over sequence length
+        # This is O(L * inner * state_dim) — slower than custom kernel but compiles
+        y = self._selective_scan(x_inner.float(), dt.float(), A, B_param.float(), C_param.float())
+        y = y.to(x.dtype)
+
+        # Skip connection + gate
+        y = y + x_inner * self.D.to(dtype=x.dtype)[None, None, :]
+        y = y * F.silu(z)
+
+        return self.out_proj(y)
+
+    def _selective_scan(self, x, dt, A, B, C):
+        """Selective scan in pure PyTorch. x: (B,L,D), dt: (B,L,D), A: (D,N), B: (B,L,N), C: (B,L,N)"""
+        batch, seqlen, dim = x.shape
+        state_dim = A.shape[1]
+
+        # Discretize: dA = exp(dt * A), dB = dt * B
+        dA = torch.exp(dt.unsqueeze(-1) * A[None, None, :, :])  # (B, L, D, N)
+        dB = dt.unsqueeze(-1) * B.unsqueeze(2)  # (B, L, D, N) via broadcast
+        x_db = x.unsqueeze(-1) * dB  # (B, L, D, N)
+
+        # Sequential scan
+        h = torch.zeros(batch, dim, state_dim, device=x.device, dtype=x.dtype)
+        ys = []
+        for t in range(seqlen):
+            h = dA[:, t] * h + x_db[:, t]  # (B, D, N)
+            y_t = (h * C[:, t].unsqueeze(1)).sum(dim=-1)  # (B, D)
+            ys.append(y_t)
+
+        return torch.stack(ys, dim=1)  # (B, L, D)
+
+
+class HybridBlock(nn.Module):
+    """Hybrid block: uses either attention or Mamba based on layer config."""
+    def __init__(self, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
+                 rope_base: float, qk_gain_init: float, use_mamba: bool = False,
+                 mamba_state_dim: int = 16, mamba_expand: int = 2):
+        super().__init__()
+        self.use_mamba = use_mamba
+        self.attn_norm = RMSNorm()
+        self.mlp_norm = RMSNorm()
+        if use_mamba:
+            self.seq_mixer = MambaBlock(dim, state_dim=mamba_state_dim, expand=mamba_expand)
+        else:
+            self.seq_mixer = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
+        self.mlp = MLP(dim, mlp_mult)
+        self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.resid_mix = nn.Parameter(torch.stack((torch.ones(dim), torch.zeros(dim))).float())
+
+    def forward(self, x: Tensor, x0: Tensor) -> Tensor:
+        mix = self.resid_mix.to(dtype=x.dtype)
+        x = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
+        seq_out = self.seq_mixer(self.attn_norm(x))
+        x = x + self.attn_scale.to(dtype=x.dtype)[None, None, :] * seq_out
+        x = x + self.mlp_scale.to(dtype=x.dtype)[None, None, :] * self.mlp(self.mlp_norm(x))
+        return x
+
+
 class SmearGate(nn.Module):
     """Blend each token's embedding with the previous token's embedding."""
     def __init__(self, dim: int):
@@ -771,6 +893,10 @@ class GPT(nn.Module):
         qk_gain_init: float,
         bigram_vocab_size: int = 0,
         bigram_dim: int = 128,
+        hybrid_enabled: bool = False,
+        mamba_layer_indices: tuple = (),
+        mamba_state_dim: int = 16,
+        mamba_expand: int = 2,
         mor_enabled: bool = False,
         mor_num_recursions: int = 4,
         mor_capacity: float = 0.5,
@@ -814,7 +940,14 @@ class GPT(nn.Module):
             self.num_decoder_layers = num_layers - self.num_encoder_layers
             self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
             self.skip_weights = nn.Parameter(torch.ones(self.num_skip_weights, model_dim, dtype=torch.float32))
-            self.blocks = nn.ModuleList([Block(*block_args) for _ in range(num_layers)])
+            if hybrid_enabled:
+                self.blocks = nn.ModuleList([
+                    HybridBlock(*block_args, use_mamba=(i in mamba_layer_indices),
+                                mamba_state_dim=mamba_state_dim, mamba_expand=mamba_expand)
+                    for i in range(num_layers)
+                ])
+            else:
+                self.blocks = nn.ModuleList([Block(*block_args) for _ in range(num_layers)])
 
         self.final_norm = RMSNorm()
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
@@ -980,6 +1113,10 @@ def main() -> None:
         qk_gain_init=args.qk_gain_init,
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
+        hybrid_enabled=args.hybrid_enabled,
+        mamba_layer_indices=tuple(int(x) for x in args.mamba_layers.split(",") if x.strip()) if args.mamba_layers else (),
+        mamba_state_dim=args.mamba_state_dim,
+        mamba_expand=args.mamba_expand,
         mor_enabled=args.mor_enabled,
         mor_num_recursions=args.mor_num_recursions,
         mor_capacity=args.mor_capacity,
