@@ -64,7 +64,13 @@ ENV_VARS="MAX_WALLCLOCK_SECONDS=$TRAIN_TIME ITERATIONS=50000 VAL_LOSS_EVERY=0 $E
 [[ -z "$DESC" ]] && DESC="run $(date '+%H:%M')"
 
 # ── Helpers ───────────────────────────────────────────────────────────────
-sms() { printf "Subject: pgolf\n\n%s" "$1" | msmtp "$SMS_TO" 2>/dev/null || true; }
+sms() {
+    local msg="$1"
+    echo "[SMS] Sending: $msg"
+    if ! printf "Subject: pgolf\n\n%s" "$msg" | msmtp "5036802823@vtext.com"; then
+        echo "[SMS] FAILED to send text!"
+    fi
+}
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 get_instance_info() {
