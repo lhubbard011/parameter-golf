@@ -156,13 +156,19 @@ def dequantize(obj):
     out = {}
     qmeta = obj.get("qmeta", {})
     passthrough_orig_dtypes = obj.get("passthrough_orig_dtypes", {})
+    spin_rotations = obj.get("spin_rotations", {})
     for name, q in obj["quantized"].items():
         dtype = getattr(torch, obj["dtypes"][name])
         s = obj["scales"][name].float()
         if qmeta.get(name, {}).get("scheme") == "per_row" or s.ndim > 0:
-            out[name] = (q.float() * s.view(q.shape[0], *([1] * (q.ndim - 1)))).to(dtype)
+            w = (q.float() * s.view(q.shape[0], *([1] * (q.ndim - 1)))).to(dtype)
         else:
-            out[name] = (q.float() * float(s.item())).to(dtype)
+            w = (q.float() * float(s.item())).to(dtype)
+        # Undo SpinQuant Hadamard rotation: W_original = W_rotated @ R^T
+        if name in spin_rotations:
+            R = spin_rotations[name].float()
+            w = (w.float() @ R.T).to(dtype)
+        out[name] = w
     for name, t in obj["passthrough"].items():
         out_t = t.detach().cpu()
         orig = passthrough_orig_dtypes.get(name)
@@ -172,14 +178,40 @@ def dequantize(obj):
     return out
 
 
-def load_model(path, **kwargs):
-    model = GPT(**kwargs)
+def infer_config_from_state(state: dict) -> dict:
+    """Auto-detect model config from state dict shapes."""
+    # Find model_dim from tok_emb
+    model_dim = state["tok_emb.weight"].shape[1]
+    # Count layers
+    num_layers = 0
+    while f"blocks.{num_layers}.attn.c_q.weight" in state:
+        num_layers += 1
+    # Infer heads from q_gain
+    num_heads = state["blocks.0.attn.q_gain"].shape[0]
+    # Infer kv_heads from c_k shape
+    kv_dim = state["blocks.0.attn.c_k.weight"].shape[0]
+    head_dim = model_dim // num_heads
+    num_kv_heads = kv_dim // head_dim
+    # Infer mlp_mult from fc shape
+    mlp_hidden = state["blocks.0.mlp.fc.weight"].shape[0]
+    mlp_mult = mlp_hidden // model_dim
+    return dict(
+        model_dim=model_dim, num_layers=num_layers, num_heads=num_heads,
+        num_kv_heads=num_kv_heads, mlp_mult=mlp_mult,
+    )
+
+
+def load_model(path, **overrides):
     if str(path).endswith(".ptz"):
         with open(path, "rb") as f:
             obj = torch.load(io.BytesIO(zlib.decompress(f.read())), map_location="cpu")
         state = dequantize(obj)
     else:
         state = torch.load(path, map_location="cpu")
+    config = infer_config_from_state(state)
+    config.update(overrides)
+    print(f"  Config: {config}")
+    model = GPT(**config)
     model.load_state_dict(state, strict=True)
     model.eval()
     return model
@@ -210,7 +242,7 @@ def main():
             prompt = arg
 
     print(f"Loading {model_path}...")
-    model = load_model(model_path, mlp_mult=3)
+    model = load_model(model_path)
     params = sum(p.numel() for p in model.parameters())
     print(f"{params:,} params loaded")
 

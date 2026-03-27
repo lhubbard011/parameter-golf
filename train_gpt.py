@@ -310,22 +310,56 @@ def _hadamard_matrix(n: int) -> Tensor:
     return H
 
 def spin_rotate_state_dict(state_dict: dict[str, Tensor]) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
-    """Apply Hadamard rotation to 2D weight matrices before quantization.
-    Returns (rotated_state_dict, rotation_matrices) — rotations must be
-    stored and applied at inference to undo the rotation."""
-    rotated = {}
-    rotations = {}
-    for name, t in state_dict.items():
-        if t.ndim == 2 and t.is_floating_point() and t.numel() > INT8_KEEP_FLOAT_MAX_NUMEL:
-            # Rotate columns: W' = W @ R, where R is orthogonal
-            # At inference: x' = R^T @ x, then W' @ x' = W @ R @ R^T @ x = W @ x
-            cols = t.shape[1]
-            R = _hadamard_matrix(cols).to(t.device, t.dtype)
-            rotated[name] = t @ R
-            rotations[name] = R
-        else:
-            rotated[name] = t
-    return rotated, rotations
+    """Apply Hadamard rotation at block boundaries (RMSNorm invariant points).
+
+    For each block, the hidden state passes through:
+        x -> RMSNorm -> [c_q, c_k, c_v] -> attn -> proj -> residual
+        x -> RMSNorm -> fc -> relu^2 -> proj_mlp -> residual
+
+    RMSNorm(x @ R) = RMSNorm(x) @ R, so we can absorb R into weights:
+        - Input weights (c_q, c_k, c_v, fc): W' = W @ R^T  (absorb R from input)
+        - Output weights (attn.proj, mlp.proj): W' = R @ W  (produce R @ output for next block)
+
+    After this, R cancels between blocks: proj produces R@h, next block's
+    input weights expect R@h. Full precision is IDENTICAL. But the rotated
+    weights have spread-out outliers -> much better quantization.
+
+    No rotation matrices need to be stored — the rotation is permanently fused.
+    """
+    sd = dict(state_dict)  # shallow copy
+
+    # Detect model_dim from tok_emb
+    model_dim = sd["tok_emb.weight"].shape[1]
+    R = _hadamard_matrix(model_dim).to(sd["tok_emb.weight"].device, torch.float32)
+    Rt = R.T
+
+    # Find all block indices
+    block_ids = []
+    i = 0
+    while f"blocks.{i}.attn.c_q.weight" in sd:
+        block_ids.append(i)
+        i += 1
+
+    for bid in block_ids:
+        prefix = f"blocks.{bid}"
+
+        # Input weights: absorb R from hidden state (W' = W @ R^T)
+        for suffix in ["attn.c_q.weight", "attn.c_k.weight", "attn.c_v.weight", "mlp.fc.weight"]:
+            key = f"{prefix}.{suffix}"
+            if key in sd:
+                sd[key] = (sd[key].float() @ Rt).to(state_dict[key].dtype)
+
+        # Output weights: produce rotated output (W' = R @ W)
+        for suffix in ["attn.proj.weight", "mlp.proj.weight"]:
+            key = f"{prefix}.{suffix}"
+            if key in sd:
+                sd[key] = (R @ sd[key].float()).to(state_dict[key].dtype)
+
+    # Rotate token embedding output (first thing into the model)
+    if "tok_emb.weight" in sd:
+        sd["tok_emb.weight"] = (sd["tok_emb.weight"].float() @ Rt).to(state_dict["tok_emb.weight"].dtype)
+
+    return sd, {}  # empty rotations dict — nothing to undo at inference
 def tensor_nbytes(t: Tensor) -> int:
     return int(t.numel()) * int(t.element_size())
 def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, str]) -> Tensor:
@@ -1067,8 +1101,6 @@ def main() -> None:
         log0("SpinQuant: applying Hadamard rotation before quantization...")
         sd, spin_rotations = spin_rotate_state_dict(sd)
     quant_obj, quant_stats = quantize_state_dict_int8(sd)
-    if spin_rotations:
-        quant_obj["spin_rotations"] = {name: R.half() for name, R in spin_rotations.items()}
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
