@@ -223,8 +223,14 @@ run_experiment() {
         python3 -u train_gpt.py > run_${run_id}.log 2>&1
     "
 
-    # Pull log
+    # Rename model files on remote so they don't get overwritten
+    ssh $SOPTS ubuntu@$IP "cd ~/parameter-golf && cp final_model.pt models_${run_id}.pt 2>/dev/null; cp final_model.int8.ptz models_${run_id}.int8.ptz 2>/dev/null" 2>/dev/null
+
+    # Pull log + models
+    mkdir -p ./models
     scp $SOPTS ubuntu@$IP:~/parameter-golf/run_${run_id}.log ./run_${run_id}.log 2>/dev/null
+    scp $SOPTS ubuntu@$IP:~/parameter-golf/models_${run_id}.int8.ptz ./models/${run_id}.int8.ptz 2>/dev/null
+    scp $SOPTS ubuntu@$IP:~/parameter-golf/models_${run_id}.pt ./models/${run_id}.pt 2>/dev/null
 
     # Extract results
     local val_bpb=$(grep "val_bpb:" ./run_${run_id}.log 2>/dev/null | tail -1 | grep -oP 'val_bpb:\K[0-9.]+' || true)
